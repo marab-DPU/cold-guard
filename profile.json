@@ -2,11 +2,11 @@
   "name": "supermarket-refrigeration",
   "mode": "enforce",
   "listen": "0.0.0.0:502",
-  "watchdog": "127.0.0.1:502",
-  "plc": "127.0.0.1:5020",
+  "watchdog": "192.168.50.2:502",
+  "plc": "192.168.50.20:5020",
   "events_file": "events.jsonl",
   "allowed_writers": [
-    "127.0.0.2"
+    "192.168.50.20"
   ],
   "allowed_function_codes": [
     1,

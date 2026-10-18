@@ -1,0 +1,42 @@
+{
+  "name": "supermarket-refrigeration",
+  "mode": "enforce",
+  "listen": "0.0.0.0:502",
+  "plc": "127.0.0.1:5020",
+  "events_file": "events.jsonl",
+  "allowed_writers": [
+    "127.0.0.2"
+  ],
+  "allowed_function_codes": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "write_function_codes": [
+    5,
+    6
+  ],
+  "coils": {
+    "0": "compressor",
+    "1": "defrost"
+  },
+  "holding_registers": {
+    "0": {
+      "name": "setpoint",
+      "min": -250,
+      "max": 40
+    }
+  },
+  "input_registers": {
+    "0": "case_temperature"
+  },
+  "defrost_min_interval_seconds": 120,
+  "rate_limit": {
+    "writes": 5,
+    "seconds": 2
+  },
+  "state_file": "state.json"
+}

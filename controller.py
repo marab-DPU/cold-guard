@@ -1,16 +1,22 @@
 """
 Store controller (HMI) — the legitimate operator system. Runs on Conner's laptop.
 
-This is the normal traffic Cold Guard should always allow. It connects to the
-watchdog (never straight to the PLC), reads the case temperature once a second,
-and cycles the compressor to hold the setpoint. Every so often it runs a short,
-spaced-out defrost, exactly the kind of well-behaved pattern the rules expect.
+This is the normal traffic Cold Guard should always allow. It talks to the
+watchdog (never straight to the PLC) and runs a closed loop once a second:
 
-Run:  python controller.py            (reads profile.json for addresses)
+  * it holds the setpoint at a safe value, re-asserting it if something changed it
+  * it turns OFF any defrost it did not start itself
+  * it cycles the compressor to keep the case near the setpoint
+  * on its own schedule it runs a short, spaced-out defrost
 
-Note: this connects to the watchdog's "listen" address. In the demo it must
-bind to an allowed writer IP (profile.json -> allowed_writers). On one machine
-that means a loopback alias; across the switch it is just this laptop's IP.
+It only WRITES when a value is actually wrong, so in steady state it sends very
+little traffic (well under the watchdog's rate limit). This is also what makes
+the fridge recover on its own after an attack: while the watchdog is bypassed
+the attacker keeps overriding it, but the moment Cold Guard is armed again the
+attacker is blocked, the controller's corrections get through, and the case is
+driven back to a safe temperature with no manual step.
+
+Run:  python3 controller.py            (reads profile.json for addresses)
 """
 
 import json
@@ -28,10 +34,10 @@ CO_COMPRESSOR = 0
 CO_DEFROST = 1
 IR_CASE_TEMP = 0
 
-SETPOINT = -200          # -20.0 C in tenths
+SETPOINT = -200          # -20.0 C in tenths, the safe target
 HYSTERESIS = 10          # +/- 1.0 C band around the setpoint
-DEFROST_EVERY = 150      # seconds between defrosts (safely over the rule's limit)
-DEFROST_LENGTH = 8       # seconds a defrost runs
+DEFROST_EVERY = 150      # seconds between the controller's own defrosts
+DEFROST_LENGTH = 8       # seconds a scheduled defrost runs
 
 
 def to_signed(v):
@@ -52,36 +58,49 @@ def main():
         return
     print("Store controller running (normal operations)", flush=True)
 
-    # Make sure the setpoint is sane at startup.
-    client.write_register(HR_SETPOINT, SETPOINT & 0xFFFF)
-
     last_defrost = time.monotonic()
     defrosting_until = 0.0
 
     try:
         while True:
-            temp = to_signed(client.read_input_registers(IR_CASE_TEMP, count=1).registers[0])
             now = time.monotonic()
 
-            # Periodic, short defrost cycle.
-            if not defrosting_until and now - last_defrost > DEFROST_EVERY:
-                client.write_coil(CO_DEFROST, True)
-                client.write_coil(CO_COMPRESSOR, False)
-                defrosting_until = now + DEFROST_LENGTH
-                last_defrost = now
-                print(f"  controller: defrost start (case {temp/10:.1f}C)", flush=True)
-            elif defrosting_until and now >= defrosting_until:
-                client.write_coil(CO_DEFROST, False)
-                defrosting_until = 0.0
-                print("  controller: defrost end", flush=True)
-            elif not defrosting_until:
-                # Normal thermostat: hold the setpoint within the band.
-                if temp > SETPOINT + HYSTERESIS:
+            # --- read the current state (reads are always allowed) ---
+            temp = to_signed(client.read_input_registers(IR_CASE_TEMP, count=1).registers[0])
+            setpoint = to_signed(client.read_holding_registers(HR_SETPOINT, count=1).registers[0])
+            defrost_on = bool(client.read_coils(CO_DEFROST, count=1).bits[0])
+            compressor_on = bool(client.read_coils(CO_COMPRESSOR, count=1).bits[0])
+
+            # --- 1. keep the setpoint where it belongs (undo any tampering) ---
+            if setpoint != SETPOINT:
+                client.write_register(HR_SETPOINT, SETPOINT & 0xFFFF)
+
+            # --- 2. defrost: run our own schedule, cancel anyone else's ---
+            if defrosting_until:
+                if now >= defrosting_until:
+                    if defrost_on:
+                        client.write_coil(CO_DEFROST, False)
+                    defrosting_until = 0.0
+            else:
+                if now - last_defrost > DEFROST_EVERY:
+                    client.write_coil(CO_DEFROST, True)
+                    client.write_coil(CO_COMPRESSOR, False)
+                    defrosting_until = now + DEFROST_LENGTH
+                    last_defrost = now
+                elif defrost_on:
+                    # A defrost we did not start (an attacker). Shut it off.
+                    client.write_coil(CO_DEFROST, False)
+
+            # --- 3. thermostat: hold the band (only when not defrosting) ---
+            if not defrosting_until:
+                if temp > SETPOINT + HYSTERESIS and not compressor_on:
                     client.write_coil(CO_COMPRESSOR, True)
-                elif temp < SETPOINT - HYSTERESIS:
+                elif temp < SETPOINT - HYSTERESIS and compressor_on:
                     client.write_coil(CO_COMPRESSOR, False)
 
-            print(f"  controller: case {temp/10:.1f}C  setpoint {SETPOINT/10:.1f}C", end="\r", flush=True)
+            state = "DEFROST" if defrost_on else ("cooling" if compressor_on else "idle")
+            print(f"  controller: case {temp/10:+.1f}C  target {SETPOINT/10:.1f}C  {state}    ",
+                  end="\r", flush=True)
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nStore controller stopped.")

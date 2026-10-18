@@ -1,5 +1,5 @@
 """
-Attacker — the rogue device on the store network. Runs on Daya's laptop.
+Attacker — the rogue device on the store network. Runs on the Mac (192.168.50.10).
 
 This is the demo's red team. On our OWN simulated fridge, on our OWN closed demo
 network, it recreates the October 2026 supermarket refrigeration attack: drive
@@ -72,7 +72,7 @@ def main():
     path, client = GUARDED, open_path(GUARDED)
     if client is None:
         path, client = DIRECT, open_path(DIRECT)
-    print("Attacker: continuously pushing the French supermarket attack.")
+    print("Attacker: continuously pushing the October 2026 supermarket refrigeration attack.")
     print("(Ctrl+C to stop)\n", flush=True)
     next_probe = time.monotonic() + PROBE_EVERY
 

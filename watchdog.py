@@ -7,7 +7,8 @@ read whole, checked against six rules, and then either forwarded to the PLC or
 blocked with a Modbus exception response. Every decision is printed in color
 (green = allowed, red = blocked) and appended to events.jsonl.
 
-Only Python's standard library is used, so the Raspberry Pi needs no installs.
+Only Python's standard library is used, so the Parrot machine (192.168.50.2)
+needs no installs.
 
 The six rules, checked in order (first failure wins):
   1. source      only an allowed writer may send a write

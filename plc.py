@@ -1,5 +1,6 @@
 """
-Fridge PLC — the simulated refrigeration controller. Runs on Moe's Mac.
+Fridge PLC — the simulated refrigeration controller. Runs on the Linux plant
+box (192.168.50.20), alongside the controller and dashboard.
 
 A small Modbus TCP server written on plain sockets (standard library only, no
 pymodbus) so it behaves identically on any machine and shares its frame format

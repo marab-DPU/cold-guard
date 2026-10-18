@@ -1,5 +1,6 @@
 """
-Store controller (HMI) — the legitimate operator system. Runs on Conner's laptop.
+Store controller (HMI) — the legitimate operator system. Runs on the Linux
+plant box (192.168.50.20), alongside the PLC and dashboard.
 
 This is the normal traffic Cold Guard should always allow. It runs a closed
 loop once a second:

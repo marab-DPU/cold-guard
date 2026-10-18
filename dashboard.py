@@ -13,7 +13,6 @@ Run:  streamlit run dashboard.py
 """
 
 import json
-import os
 
 import streamlit as st
 
@@ -22,9 +21,6 @@ EVENTS_FILE = "events.jsonl"
 DANGER_C = 4.0  # food-safety line
 
 st.set_page_config(page_title="Cold Guard", layout="wide")
-
-# Auto-refresh ~once a second without any extra dependency.
-st.markdown("<meta http-equiv='refresh' content='1'>", unsafe_allow_html=True)
 
 
 def load_state():
@@ -43,72 +39,81 @@ def load_events(limit=18):
                 line = line.strip()
                 if line:
                     try:
-                        rows.append(json.loads(line))
+                        row = json.loads(line)
                     except json.JSONDecodeError:
-                        pass
+                        continue
+                    if row.get("fc") in (1, 2, 3, 4):
+                        continue  # skip routine reads; show writes and blocks
+                    rows.append(row)
     except OSError:
         pass
     return rows[-limit:][::-1]  # newest first
 
 
-state = load_state()
-events = load_events()
-
 st.title("🧊 Cold Guard — refrigeration watchdog")
 
-left, right = st.columns([1, 1.4])
 
-with left:
-    st.subheader("Fridge")
-    if state is None:
-        st.info("Waiting for the fridge… start plc.py")
-    else:
-        temp = state["case_temp_c"]
-        danger = temp > DANGER_C
-        st.metric(
-            "Case temperature",
-            f"{temp:.1f} °C",
-            delta=f"setpoint {state['setpoint_c']:.1f} °C",
-            delta_color="off",
-        )
-        if danger:
-            st.error(f"⚠ ABOVE {DANGER_C:.0f} °C — food-safety line crossed")
+@st.fragment(run_every=1)
+def render_live_dashboard():
+    state = load_state()
+    events = load_events()
+
+    left, right = st.columns([1, 1.4])
+
+    with left:
+        st.subheader("Fridge")
+        if state is None:
+            st.info("Waiting for the fridge… start plc.py")
         else:
-            st.success("Within safe range")
-        st.write(
-            f"Compressor: {'🟢 on' if state['compressor'] else '⚪ off'}  |  "
-            f"Defrost: {'🔴 on' if state['defrost'] else '⚪ off'}"
-        )
-
-with right:
-    st.subheader("Cold Guard traffic")
-    last_blocked = events and events[0]["decision"] == "BLOCK"
-    if last_blocked:
-        e = events[0]
-        st.error(f"🚫 BLOCKED — {e['rule']}: {e['detail']}  (from {e['src']})")
-
-    blocked = sum(1 for e in events if e["decision"] == "BLOCK")
-    allowed = sum(1 for e in events if e["decision"] in ("ALLOW", "BYPASS"))
-    c1, c2 = st.columns(2)
-    c1.metric("Allowed (recent)", allowed)
-    c2.metric("Blocked (recent)", blocked)
-
-    if not events:
-        st.info("No traffic yet… start the watchdog and controller")
-    for e in events:
-        if e["decision"] == "BLOCK":
-            st.markdown(
-                f":red[**BLOCK**] `{e['time']}` {e['src']} "
-                f"FC{e['fc']} addr {e['address']} val {e['value']} "
-                f"— **{e['rule']}**: {e['detail']}"
+            temp = state["case_temp_c"]
+            danger = temp > DANGER_C
+            st.metric(
+                "Case temperature",
+                f"{temp:.1f} °C",
+                delta=f"setpoint {state['setpoint_c']:.1f} °C",
+                delta_color="off",
             )
-        elif e["decision"] == "BYPASS":
-            st.markdown(
-                f":orange[BYPASS] `{e['time']}` {e['src']} "
-                f"FC{e['fc']} addr {e['address']} val {e['value']}"
+            if danger:
+                st.error(f"⚠ ABOVE {DANGER_C:.0f} °C — food-safety line crossed")
+            else:
+                st.success("Within safe range")
+            st.write(
+                f"Compressor: {'🟢 on' if state['compressor'] else '⚪ off'}  |  "
+                f"Defrost: {'🔴 on' if state['defrost'] else '⚪ off'}"
             )
-        else:
-            st.markdown(
-                f":green[ALLOW] `{e['time']}` {e['src']} "
-                f"FC{e['fc']} {e['detail']}"
-            )
+
+    with right:
+        st.subheader("Cold Guard traffic")
+        last_blocked = events and events[0]["decision"] == "BLOCK"
+        if last_blocked:
+            e = events[0]
+            st.error(f"🚫 BLOCKED — {e['rule']}: {e['detail']}  (from {e['src']})")
+
+        blocked = sum(1 for e in events if e["decision"] == "BLOCK")
+        allowed = sum(1 for e in events if e["decision"] in ("ALLOW", "BYPASS"))
+        c1, c2 = st.columns(2)
+        c1.metric("Allowed (recent)", allowed)
+        c2.metric("Blocked (recent)", blocked)
+
+        if not events:
+            st.info("No traffic yet… start the watchdog and controller")
+        for e in events:
+            if e["decision"] == "BLOCK":
+                st.markdown(
+                    f":red[**BLOCK**] `{e['time']}` {e['src']} "
+                    f"FC{e['fc']} addr {e['address']} val {e['value']} "
+                    f"— **{e['rule']}**: {e['detail']}"
+                )
+            elif e["decision"] == "BYPASS":
+                st.markdown(
+                    f":orange[BYPASS] `{e['time']}` {e['src']} "
+                    f"FC{e['fc']} addr {e['address']} val {e['value']}"
+                )
+            else:
+                st.markdown(
+                    f":green[ALLOW] `{e['time']}` {e['src']} "
+                    f"FC{e['fc']} {e['detail']}"
+                )
+
+
+render_live_dashboard()

@@ -33,6 +33,33 @@ defrost) against a simulated fridge, and blocks it live.
 
 All limits live in `profile.json`, so tuning needs no code changes.
 
+## Safety limits (always on, even in bypass)
+
+Underneath the six rules is a safety tier that bypass can't switch off and no
+network command can change (`safety_limits` in `profile.json`, tenths of °C):
+
+- **Hard ceiling** (`case_temp_max`, 0 °C): a setpoint above it is always refused.
+- **Trip** (`trip_at`, −3 °C): Cold Guard reads the case temperature itself every
+  half second. Once the case reaches the trip point, it refuses every command
+  that adds heat (defrost on, compressor off), from anyone, and holds the
+  fridge in its safe state (defrost off, compressor on).
+- **Reset** (`reset_at`, −6 °C): the hold releases once the case has cooled.
+
+It trips below the ceiling because the case keeps warming for a moment after
+the heat is cut. The only command Cold Guard ever sends on its own is that
+cooling-only safe state. Bulk writes (FC 15/16) are also refused in bypass,
+since they can't be checked value by value.
+
+## Fail-open
+
+Cold Guard must never be the reason a store's refrigeration stops. If it
+crashes, reboots or loses power, `controller.py` notices within about a
+second, switches to talking to the PLC directly, and keeps the case at its
+normal temperature. Every 5 seconds it checks whether Cold Guard is back and
+routes through it again when it is. The dashboard shows a FAIL-OPEN banner
+while this is happening. While fail-open the fridge runs but is unprotected,
+exactly as it was before Cold Guard was installed.
+
 ## Register map
 
 | Table | Address | Name | Meaning |
@@ -64,19 +91,21 @@ Starts the PLC and watchdog in one process and exercises all six rules.
 4. On **Conner's laptop**: `python3 controller.py`
 5. On **Daya's laptop**: `python3 attacker.py`
 
-### Bypass mode (the before/after)
+### Bypass mode
 
-Set `"mode": "bypass"` in `profile.json`, or create a file named `BYPASS` next
-to `watchdog.py`. In bypass, every command is forwarded (marked `BYPASS`), so the
-attack gets through and the dashboard shows the case climbing past 4 °C.
+Set `"mode": "bypass"` in `profile.json`, or create a file named `BYPASS` in the
+folder you run `watchdog.py` from. In bypass the six rules are off and commands
+are forwarded (marked `BYPASS`), but the safety limits still apply.
 
 ## Demo arc
 
-1. Normal operation: case holds about −18 °C, traffic flows green.
-2. Daya runs the attack: Cold Guard blocks it, the Pi screen and dashboard go red,
-   the log names the rule.
-3. Flip to bypass and rerun: the case warms past the 4 °C food-safety line.
-4. Swap the profile and the same watchdog protects a different plant.
+1. **Test 1, armed:** the attack runs and every command is blocked; the log names
+   the rule. The case holds about −20 °C.
+2. **Test 2, bypassed:** the attacker's compressor-off and defrost-on commands get
+   through and the case warms, but the safety limits refuse the 50 °C setpoint
+   and stop the case before it reaches 0 °C. The dashboard shows the peak.
+3. Re-arm: the attack is blocked again and the controller pulls the case back down.
+4. Optional: stop the watchdog. The controller fails open and the fridge keeps running.
 
 ## AI disclosure
 

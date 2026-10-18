@@ -34,6 +34,12 @@
   "input_registers": {
     "0": "case_temperature"
   },
+  "safety_limits": {
+    "case_temp_max": 0,
+    "trip_at": -30,
+    "reset_at": -60,
+    "check_every_seconds": 0.5
+  },
   "defrost_min_interval_seconds": 120,
   "rate_limit": {
     "writes": 5,

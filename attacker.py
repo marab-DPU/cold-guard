@@ -8,11 +8,12 @@ warms up and the food spoils.
 
 It attacks continuously, once every half second, so you can watch Cold Guard's
 state decide the outcome live:
-  * watchdog ARMED  -> every attempt reads BLOCKED, the case stays cold
-  * watchdog BYPASS -> attempts read GOT THROUGH, the case climbs past the
-                       food-safety line
-  * re-arm again    -> attempts go back to BLOCKED and the store controller
-                       pulls the case back down to safe
+  * watchdog ARMED  -> every command reads blocked, the case stays cold
+  * watchdog BYPASS -> compressor-off and defrost-on go THROUGH and the case
+                       warms, but Cold Guard's always-on safety limits refuse
+                       the 50C setpoint and stop the case before it passes 0C
+  * re-arm again    -> everything is blocked and the store controller pulls
+                       the case back down to its normal temperature
 
 Stop it with Ctrl+C. It only touches the addresses in profile.json.
 
@@ -57,16 +58,11 @@ def main():
             r2 = client.write_coil(CO_COMPRESSOR, False)
             r3 = client.write_coil(CO_DEFROST, True)
 
-            results = [r1, r2, r3]
-            blocked = all(r.isError() for r in results)
-            through = all(not r.isError() for r in results)
-            if blocked:
-                status = "BLOCKED       "
-            elif through:
-                status = "GOT THROUGH ⚠ "
-            else:
-                status = "partial        "
-            print(f"  attack -> {status}", end="\r", flush=True)
+            # Show each command's fate so a partial block is easy to read.
+            def fate(r):
+                return "blocked" if r.isError() else "THROUGH"
+            print(f"  attack -> setpoint 50C: {fate(r1)} | compressor off: {fate(r2)}"
+                  f" | defrost on: {fate(r3)}   ", end="\r", flush=True)
 
         except Exception:
             # Watchdog restarting or network blip; try to reconnect next loop.

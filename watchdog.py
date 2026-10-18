@@ -20,9 +20,18 @@ The six rules, checked in order (first failure wins):
 Run:  python watchdog.py                 (reads profile.json)
       python watchdog.py other.json      (a different profile)
 
-Toggle bypass live by creating/deleting a file named BYPASS next to this script,
-or set "mode": "bypass" in the profile. In bypass, everything is forwarded
-(and marked BYPASS in the log) so the demo can show the attack getting through.
+Toggle bypass live by creating/deleting a file named BYPASS in the folder you
+run it from, or set "mode": "bypass" in the profile. In bypass the six rules
+are switched off and commands are forwarded (marked BYPASS in the log).
+
+Safety limits (the "safety_limits" block in the profile) sit underneath the six
+rules and are enforced in EVERY mode, including bypass. Nothing on the network
+can change them:
+  * a setpoint above the hard ceiling is always refused
+  * Cold Guard reads the case temperature itself every half second; once it
+    reaches "trip_at" it refuses every heating command (defrost on, compressor
+    off) from anyone, and holds the fridge in its safe state (defrost off,
+    compressor on) until it cools to "reset_at". It only ever cools.
 """
 
 import asyncio
@@ -53,6 +62,7 @@ EXC_ILLEGAL_VALUE = 3
 GREEN = "\033[92m"
 RED = "\033[91m"
 YELLOW = "\033[93m"
+MAGENTA = "\033[95m"
 DIM = "\033[2m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
@@ -63,6 +73,25 @@ _last_defrost_on = 0.0  # last time defrost was switched on (defrost limit)
 
 _allowed = 0
 _blocked = 0
+
+# --- safety limits: enforced in every mode, bypass included ------------------
+SAFETY = PROFILE.get("safety_limits")      # None = no safety tier
+_safety = {"temp": None, "tripped": False, "tid": 0, "plc_ok": True}
+
+
+def _addr(table, name):
+    """Find an address in the profile by its name, e.g. coils -> 'defrost'."""
+    for key, val in PROFILE.get(table, {}).items():
+        label = val if isinstance(val, str) else val.get("name")
+        if label == name:
+            return int(key)
+    return None
+
+
+COIL_COMPRESSOR = _addr("coils", "compressor")
+COIL_DEFROST = _addr("coils", "defrost")
+REG_SETPOINT = _addr("holding_registers", "setpoint")
+IR_CASE_TEMP = _addr("input_registers", "case_temperature")
 
 
 def split_addr(addr):
@@ -97,6 +126,12 @@ def log_event(src_ip, fc, address, value, decision, rule, detail):
     except OSError:
         pass  # logging must never stop the proxy
 
+    if decision == "SAFETY":
+        # Cold Guard's own safety action (trip, reset, or safe state sent).
+        print(f"{MAGENTA}{BOLD}SAFETY{RESET} {DIM}{event['time']}{RESET} "
+              f"{MAGENTA}{detail}{RESET}", flush=True)
+        return
+
     if decision == "ALLOW":
         _allowed += 1
         color, tag = GREEN, "ALLOW "
@@ -105,7 +140,7 @@ def log_event(src_ip, fc, address, value, decision, rule, detail):
         color, tag = YELLOW, "BYPASS"
     else:
         _blocked += 1
-        color, tag = RED, "BLOCK "
+        color, tag = (MAGENTA if rule == "safety" else RED), "BLOCK "
 
     line = (
         f"{color}{tag}{RESET} {DIM}{event['time']}{RESET} "
@@ -212,6 +247,106 @@ def check_rules(src_ip, pdu):
     return "ALLOW", "-", name, address, value
 
 
+def check_safety(pdu):
+    """
+    The safety limits. Unlike the six rules above, these are checked in every
+    mode, bypass included. Return None if the command is safe, else the reason.
+    """
+    if not SAFETY:
+        return None
+    fc = pdu[0]
+
+    # Bulk writes can't be checked value-by-value here, so they never pass.
+    if fc in (15, 16, 22, 23):
+        return f"FC{fc} bulk write can't be checked against the safety limits"
+    if fc not in (FC_WRITE_COIL, FC_WRITE_REGISTER):
+        return None
+
+    address, value = parse_write(pdu)
+    ceiling = SAFETY["case_temp_max"]
+
+    # A setpoint above the ceiling is never allowed, at any temperature.
+    if fc == FC_WRITE_REGISTER and address == REG_SETPOINT and to_signed(value) > ceiling:
+        return (f"setpoint {to_signed(value)/10:.1f}C is above the hard "
+                f"ceiling {ceiling/10:.1f}C")
+
+    # Once tripped, nothing may add heat until the case has cooled back down.
+    if _safety["tripped"] and fc == FC_WRITE_COIL:
+        if address == COIL_DEFROST and value == 1:
+            return "defrost on refused: case is at the safety limit"
+        if address == COIL_COMPRESSOR and value == 0:
+            return "compressor off refused: case is at the safety limit"
+    return None
+
+
+async def _plc_call(reader, writer, pdu):
+    """One request on the safety monitor's own PLC connection; returns the reply PDU."""
+    _safety["tid"] = (_safety["tid"] + 1) & 0xFFFF
+    writer.write(struct.pack(">HHHB", _safety["tid"], 0, len(pdu) + 1, 1) + pdu)
+    await writer.drain()
+    _, reply = await asyncio.wait_for(read_frame(reader), timeout=2)
+    if reply[0] & 0x80:
+        raise ValueError(f"PLC refused FC{pdu[0]}")
+    return reply
+
+
+async def safety_monitor():
+    """
+    Read the case temperature every half second on Cold Guard's own connection.
+    At trip_at: latch, refuse all heating commands, and hold the safe state
+    (defrost off, compressor on). At reset_at: release. This only ever cools.
+    """
+    if not SAFETY:
+        return
+    host, port = split_addr(PROFILE["plc"])
+    trip_at = SAFETY["trip_at"]
+    reset_at = SAFETY["reset_at"]
+    every = SAFETY.get("check_every_seconds", 0.5)
+    n_coils = max(COIL_COMPRESSOR, COIL_DEFROST) + 1
+
+    while True:
+        writer = None
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+            if not _safety["plc_ok"]:
+                print(f"{MAGENTA}safety monitor reconnected to the PLC{RESET}", flush=True)
+                _safety["plc_ok"] = True
+            while True:
+                reply = await _plc_call(reader, writer, struct.pack(">BHH", 4, IR_CASE_TEMP, 1))
+                temp = to_signed(struct.unpack(">H", reply[2:4])[0])
+                _safety["temp"] = temp
+
+                if not _safety["tripped"] and temp >= trip_at:
+                    _safety["tripped"] = True
+                    log_event("cold-guard", None, None, None, "SAFETY", "safety",
+                              f"TRIP: case {temp/10:.1f}C reached {trip_at/10:.1f}C "
+                              f"- refusing heat, holding defrost off + compressor on")
+                elif _safety["tripped"] and temp <= reset_at:
+                    _safety["tripped"] = False
+                    log_event("cold-guard", None, None, None, "SAFETY", "safety",
+                              f"RESET: case back to {temp/10:.1f}C - safety hold released")
+
+                if _safety["tripped"]:
+                    reply = await _plc_call(reader, writer, struct.pack(">BHH", 1, 0, n_coils))
+                    bit = lambda i: (reply[2 + i // 8] >> (i % 8)) & 1
+                    if bit(COIL_DEFROST) or not bit(COIL_COMPRESSOR):
+                        await _plc_call(reader, writer, struct.pack(">BHH", 5, COIL_DEFROST, 0x0000))
+                        await _plc_call(reader, writer, struct.pack(">BHH", 5, COIL_COMPRESSOR, 0xFF00))
+                        log_event("cold-guard", 5, None, None, "SAFETY", "safety",
+                                  "safe state sent: defrost off, compressor on")
+
+                await asyncio.sleep(every)
+        except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError,
+                ValueError, struct.error) as e:
+            if _safety["plc_ok"]:
+                print(f"{RED}[!] safety monitor can't read the PLC: {e!r}{RESET}", flush=True)
+                _safety["plc_ok"] = False
+            await asyncio.sleep(1)
+        finally:
+            if writer is not None:
+                writer.close()
+
+
 def exception_response(header, fc, exc_code):
     """Build a Modbus exception reply: same transaction, FC|0x80, exc code."""
     trans_id, proto_id, _, unit_id = struct.unpack(">HHHB", header)
@@ -232,7 +367,7 @@ async def read_frame(reader):
 def rule_to_exception(rule):
     if rule == "function":
         return EXC_ILLEGAL_FUNCTION
-    if rule in ("range",):
+    if rule in ("range", "safety"):
         return EXC_ILLEGAL_VALUE
     if rule in ("address",):
         return EXC_ILLEGAL_ADDRESS
@@ -258,6 +393,13 @@ async def handle_client(client_reader, client_writer):
 
             if bypass_active():
                 address, value = (parse_write(pdu) if fc in (5, 6) else (None, None))
+                # The six rules are off, but the safety limits still apply.
+                reason = check_safety(pdu)
+                if reason:
+                    log_event(src_ip, fc, address, value, "BLOCK", "safety", reason)
+                    client_writer.write(exception_response(header, fc, EXC_ILLEGAL_VALUE))
+                    await client_writer.drain()
+                    continue
                 log_event(src_ip, fc, address, value, "BYPASS", "-", "bypass mode")
                 plc_writer.write(header + pdu)
                 await plc_writer.drain()
@@ -267,6 +409,10 @@ async def handle_client(client_reader, client_writer):
                 continue
 
             decision, rule, detail, address, value = check_rules(src_ip, pdu)
+            if decision == "ALLOW":
+                reason = check_safety(pdu)
+                if reason:
+                    decision, rule, detail = "BLOCK", "safety", reason
 
             if decision == "ALLOW":
                 log_event(src_ip, fc, address, value, "ALLOW", "-", detail)
@@ -283,8 +429,8 @@ async def handle_client(client_reader, client_writer):
 
     except asyncio.IncompleteReadError:
         pass
-    except (ValueError, ConnectionError) as e:
-        print(f"{RED}[!] {src_ip}: {e}{RESET}", flush=True)
+    except (ValueError, ConnectionError, struct.error) as e:
+        print(f"{RED}[!] {src_ip}: {e!r}{RESET}", flush=True)
     finally:
         plc_writer.close()
         client_writer.close()
@@ -298,12 +444,17 @@ def banner():
     print(f"guarding PLC {PROFILE['plc']}  |  listening {host}:{port}  |  "
           f"status {color}{mode}{RESET}", flush=True)
     print(f"{DIM}allowed writer(s): {', '.join(PROFILE['allowed_writers'])}{RESET}", flush=True)
+    if SAFETY:
+        print(f"{MAGENTA}safety limits ON in every mode: hard ceiling "
+              f"{SAFETY['case_temp_max']/10:.1f}C, trips at {SAFETY['trip_at']/10:.1f}C, "
+              f"resets at {SAFETY['reset_at']/10:.1f}C{RESET}", flush=True)
     print("-" * 64, flush=True)
 
 
 async def main():
     host, port = split_addr(PROFILE["listen"])
     banner()
+    monitor = asyncio.create_task(safety_monitor())  # noqa: F841 (kept alive)
     server = await asyncio.start_server(handle_client, host, port)
     async with server:
         await server.serve_forever()

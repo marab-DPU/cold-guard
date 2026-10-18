@@ -1,13 +1,16 @@
 """
-Plant dashboard — the view the judges watch. Runs on Moe's Mac.
+Plant dashboard — the view the judges watch.
 
-It speaks no Modbus. It just reads two files the other programs write:
-  state.json    the fridge's current temperature and status (from plc.py)
-  events.jsonl  one line per command Cold Guard allowed or blocked (from watchdog.py)
+It speaks no Modbus. It just reads files the other programs write:
+  state.json       the fridge's current temperature and status (from plc.py)
+  events.jsonl     one line per command Cold Guard allowed or blocked (from watchdog.py)
+  controller.json  whether the controller is going through Cold Guard or
+                   direct to the PLC in fail-open (from controller.py)
 
-A big temperature gauge turns red when the case crosses the food-safety line,
-and a live traffic log shows allowed (green) vs blocked (red) commands with a
-banner that flashes when the most recent command was blocked.
+A big temperature readout turns red when the case crosses the food-safety line,
+the hard ceiling and the peak temperature of the current test are shown under
+it, and a live traffic log shows allowed (green), blocked (red) and safety
+(violet) events, with a banner when the most recent command was blocked.
 
 Run:  streamlit run dashboard.py
 """
@@ -18,17 +21,22 @@ import streamlit as st
 
 STATE_FILE = "state.json"
 EVENTS_FILE = "events.jsonl"
+CONTROLLER_FILE = "controller.json"
 DANGER_C = 4.0  # food-safety line
 
-st.set_page_config(page_title="Cold Guard", layout="wide")
 
-
-def load_state():
+def load_json(path):
     try:
-        with open(STATE_FILE) as f:
+        with open(path) as f:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+profile = load_json("profile.json") or {}
+CEILING_C = (profile.get("safety_limits") or {}).get("case_temp_max", 0) / 10
+
+st.set_page_config(page_title="Cold Guard", layout="wide")
 
 
 def load_events(limit=18):
@@ -55,8 +63,9 @@ st.title("🧊 Cold Guard — refrigeration watchdog")
 
 @st.fragment(run_every=1)
 def render_live_dashboard():
-    state = load_state()
+    state = load_json(STATE_FILE)
     events = load_events()
+    link = load_json(CONTROLLER_FILE)
 
     left, right = st.columns([1, 1.4])
 
@@ -66,14 +75,16 @@ def render_live_dashboard():
             st.info("Waiting for the fridge… start plc.py")
         else:
             temp = state["case_temp_c"]
-            danger = temp > DANGER_C
+            peak = max(st.session_state.get("peak", temp), temp)
+            st.session_state["peak"] = peak
+
             st.metric(
                 "Case temperature",
                 f"{temp:.1f} °C",
                 delta=f"setpoint {state['setpoint_c']:.1f} °C",
                 delta_color="off",
             )
-            if danger:
+            if temp > DANGER_C:
                 st.error(f"⚠ ABOVE {DANGER_C:.0f} °C — food-safety line crossed")
             else:
                 st.success("Within safe range")
@@ -81,6 +92,21 @@ def render_live_dashboard():
                 f"Compressor: {'🟢 on' if state['compressor'] else '⚪ off'}  |  "
                 f"Defrost: {'🔴 on' if state['defrost'] else '⚪ off'}"
             )
+
+            c1, c2 = st.columns(2)
+            c1.metric("Hard ceiling (always on)", f"{CEILING_C:.1f} °C")
+            c2.metric("Peak this test", f"{peak:.1f} °C",
+                      delta="under ceiling" if peak <= CEILING_C else "OVER ceiling",
+                      delta_color="normal" if peak <= CEILING_C else "inverse")
+            if st.button("Reset peak"):
+                st.session_state["peak"] = temp
+
+        if link:
+            if link.get("path") == "direct":
+                st.warning(f"FAIL-OPEN since {link['since']}: Cold Guard is down, "
+                           "controller is talking to the PLC directly. Fridge still running.")
+            else:
+                st.caption(f"Controller → Cold Guard → PLC (since {link['since']})")
 
     with right:
         st.subheader("Cold Guard traffic")
@@ -98,9 +124,12 @@ def render_live_dashboard():
         if not events:
             st.info("No traffic yet… start the watchdog and controller")
         for e in events:
-            if e["decision"] == "BLOCK":
+            if e["decision"] == "SAFETY":
+                st.markdown(f":violet[**SAFETY**] `{e['time']}` {e['detail']}")
+            elif e["decision"] == "BLOCK":
+                color = "violet" if e["rule"] == "safety" else "red"
                 st.markdown(
-                    f":red[**BLOCK**] `{e['time']}` {e['src']} "
+                    f":{color}[**BLOCK**] `{e['time']}` {e['src']} "
                     f"FC{e['fc']} addr {e['address']} val {e['value']} "
                     f"— **{e['rule']}**: {e['detail']}"
                 )

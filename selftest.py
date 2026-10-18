@@ -91,7 +91,7 @@ async def body():
     passed += ok
     say(f"  [{'PASS' if ok else 'FAIL'}] legit write from wrong source -> {r} (want BLOCKED)")
 
-    say(f"\n=== {passed}/11 checks passed ===")
+    say(f"\n=== {passed}/10 checks passed ===")
 
     plc_server.close(); wd_server.close()
     await asyncio.sleep(0.1)

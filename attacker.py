@@ -33,9 +33,9 @@ DANGER_SETPOINT = 500   # +50.0 C in tenths — the headline from the real attac
 
 
 def connect():
-    host, port = PROFILE["listen"].rsplit(":", 1)
-    if host == "0.0.0.0":
-        host = "127.0.0.1"
+    # The attacker targets whatever answers as the fridge on the network,
+    # which in the demo is Cold Guard ("watchdog" in profile.json).
+    host, port = PROFILE["watchdog"].rsplit(":", 1)
     return ModbusTcpClient(host, port=int(port))
 
 

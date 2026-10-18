@@ -12,7 +12,7 @@ defrost) against a simulated fridge, and blocks it live.
 
 | File | Role | Runs on (demo) |
 |---|---|---|
-| `watchdog.py` | Cold Guard: inline proxy, six rules, colored live log | Raspberry Pi |
+| `watchdog.py` | Cold Guard: inline proxy, six rules, colored live log | Parrot OS machine |
 | `plc.py` | Simulated fridge PLC (plain-socket Modbus TCP) + physics | Moe's Mac |
 | `controller.py` | Store controller / HMI, normal traffic | Conner's laptop |
 | `attacker.py` | Rogue device replaying the refrigeration attack | Daya's laptop |
@@ -55,11 +55,12 @@ Starts the PLC and watchdog in one process and exercises all six rules.
 ### The four-device demo
 
 1. Edit `profile.json`:
-   - `listen`: the Pi's address, e.g. `0.0.0.0:502`
+   - `listen`: where the watchdog accepts connections, e.g. `0.0.0.0:502`
+   - `watchdog`: the address clients dial to reach it, e.g. `192.168.50.2:502`
    - `plc`: the Mac's address, e.g. `192.168.50.10:5020`
    - `allowed_writers`: the controller's IP, e.g. `192.168.50.20`
 2. On the **Mac**: `python3 plc.py` then, in another terminal, `streamlit run dashboard.py`
-3. On the **Pi**: `python3 watchdog.py` (full-screen terminal shows the live log)
+3. On the **Parrot machine**: `sudo python3 watchdog.py` (full-screen terminal shows the live log)
 4. On **Conner's laptop**: `python3 controller.py`
 5. On **Daya's laptop**: `python3 attacker.py`
 

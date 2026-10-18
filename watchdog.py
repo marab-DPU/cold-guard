@@ -205,7 +205,11 @@ def check_rules(src_ip, pdu):
             address, value,
         )
 
-    return "ALLOW", "-", PROFILE.get("holding_registers", {}).get(str(address), {}).get("name", "write"), address, value
+    if fc == FC_WRITE_COIL:
+        name = PROFILE["coils"].get(str(address), "coil")
+    else:
+        name = PROFILE["holding_registers"].get(str(address), {}).get("name", "register")
+    return "ALLOW", "-", name, address, value
 
 
 def exception_response(header, fc, exc_code):

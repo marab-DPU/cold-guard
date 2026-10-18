@@ -2,6 +2,7 @@
   "name": "supermarket-refrigeration",
   "mode": "enforce",
   "listen": "0.0.0.0:502",
+  "watchdog": "127.0.0.1:502",
   "plc": "127.0.0.1:5020",
   "events_file": "events.jsonl",
   "allowed_writers": [

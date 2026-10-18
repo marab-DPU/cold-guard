@@ -39,10 +39,9 @@ def to_signed(v):
 
 
 def connect():
-    # The watchdog stands where the PLC appears to be, on the "listen" port.
-    host, port = PROFILE["listen"].rsplit(":", 1)
-    if host == "0.0.0.0":
-        host = "127.0.0.1"
+    # Dial Cold Guard, never the PLC directly. "watchdog" is the address
+    # clients use to reach it (e.g. 192.168.50.2:502 on the demo network).
+    host, port = PROFILE["watchdog"].rsplit(":", 1)
     return ModbusTcpClient(host, port=int(port))
 
 
@@ -51,7 +50,7 @@ def main():
     if not client.connect():
         print("controller: could not reach the watchdog")
         return
-    print("Store controller running (normal operations)")
+    print("Store controller running (normal operations)", flush=True)
 
     # Make sure the setpoint is sane at startup.
     client.write_register(HR_SETPOINT, SETPOINT & 0xFFFF)
@@ -70,11 +69,11 @@ def main():
                 client.write_coil(CO_COMPRESSOR, False)
                 defrosting_until = now + DEFROST_LENGTH
                 last_defrost = now
-                print(f"  controller: defrost start (case {temp/10:.1f}C)")
+                print(f"  controller: defrost start (case {temp/10:.1f}C)", flush=True)
             elif defrosting_until and now >= defrosting_until:
                 client.write_coil(CO_DEFROST, False)
                 defrosting_until = 0.0
-                print("  controller: defrost end")
+                print("  controller: defrost end", flush=True)
             elif not defrosting_until:
                 # Normal thermostat: hold the setpoint within the band.
                 if temp > SETPOINT + HYSTERESIS:
@@ -82,7 +81,7 @@ def main():
                 elif temp < SETPOINT - HYSTERESIS:
                     client.write_coil(CO_COMPRESSOR, False)
 
-            print(f"  controller: case {temp/10:.1f}C  setpoint {SETPOINT/10:.1f}C", end="\r")
+            print(f"  controller: case {temp/10:.1f}C  setpoint {SETPOINT/10:.1f}C", end="\r", flush=True)
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nStore controller stopped.")
